@@ -1,0 +1,184 @@
+// ─────────────────────────────────────────────────────────
+// tailwind.config.ts
+// ─────────────────────────────────────────────────────────
+import type { Config } from 'tailwindcss'
+
+const config: Config = {
+  content: [
+    './pages/**/*.{js,ts,jsx,tsx,mdx}',
+    './components/**/*.{js,ts,jsx,tsx,mdx}',
+    './app/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: {
+    extend: {
+      colors: {
+        gold:   '#d4a843',
+        gold2:  '#f0c060',
+        silver: '#8892a4',
+        filmiq: {
+          bg:    '#060810',
+          bg2:   '#0c0f1a',
+          bg3:   '#111528',
+          card:  'rgba(255,255,255,0.03)',
+        },
+      },
+      fontFamily: {
+        display: ['Bebas Neue', 'sans-serif'],
+        body:    ['DM Sans', 'sans-serif'],
+        mono:    ['DM Mono', 'monospace'],
+      },
+      backgroundImage: {
+        'gold-gradient':   'linear-gradient(135deg, #d4a843, #b8900a)',
+        'cinema-radial':   'radial-gradient(ellipse 80% 60% at 10% 0%, rgba(212,168,67,0.06), transparent 60%)',
+      },
+      borderColor: {
+        DEFAULT: 'rgba(255,255,255,0.07)',
+      },
+      animation: {
+        'pulse-glow': 'pulse-glow 2s ease-in-out infinite',
+        ticker:       'ticker 30s linear infinite',
+      },
+      keyframes: {
+        'pulse-glow': {
+          '0%, 100%': { boxShadow: '0 0 8px rgba(34,212,154,0.6)' },
+          '50%':      { boxShadow: '0 0 0px rgba(34,212,154,0)' },
+        },
+        ticker: {
+          from: { transform: 'translateX(0)' },
+          to:   { transform: 'translateX(-50%)' },
+        },
+      },
+    },
+  },
+  plugins: [],
+}
+export default config
+
+
+// ─────────────────────────────────────────────────────────
+// next.config.mjs
+// ─────────────────────────────────────────────────────────
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      { protocol: 'https', hostname: 'image.tmdb.org' },
+      { protocol: 'https', hostname: 'upload.wikimedia.org' },
+    ],
+  },
+  env: {
+    NEXT_PUBLIC_API_URL:         process.env.NEXT_PUBLIC_API_URL         || 'http://localhost:8000',
+    NEXT_PUBLIC_ANTHROPIC_MODEL: process.env.NEXT_PUBLIC_ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
+  },
+}
+export default nextConfig
+
+
+// ─────────────────────────────────────────────────────────
+// package.json
+// ─────────────────────────────────────────────────────────
+{
+  "name": "filmiq-frontend",
+  "version": "1.0.0",
+  "description": "FilmIQ — African Cinema Intelligence Platform Frontend",
+  "private": true,
+  "scripts": {
+    "dev":   "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint":  "next lint",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next":            "14.2.18",
+    "react":           "^18.3.1",
+    "react-dom":       "^18.3.1",
+    "typescript":      "^5.6.3",
+    "framer-motion":   "^11.11.17",
+    "recharts":        "^2.13.3",
+    "lucide-react":    "^0.460.0",
+    "@anthropic-ai/sdk": "^0.32.1",
+    "clsx":            "^2.1.1",
+    "tailwind-merge":  "^2.5.4",
+    "date-fns":        "^4.1.0",
+    "zustand":         "^5.0.1",
+    "swr":             "^2.2.5"
+  },
+  "devDependencies": {
+    "@types/node":              "^22.9.0",
+    "@types/react":             "^18.3.12",
+    "@types/react-dom":         "^18.3.1",
+    "autoprefixer":             "^10.4.20",
+    "postcss":                  "^8.4.49",
+    "tailwindcss":              "^3.4.15",
+    "eslint":                   "^9.15.0",
+    "eslint-config-next":       "14.2.18",
+    "@shadcn/ui":               "^0.0.4"
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// app/globals.css
+// ─────────────────────────────────────────────────────────
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --gold:   #d4a843;
+    --cyan:   #38d9f5;
+    --green:  #22d49a;
+    --red:    #f05068;
+    --purple: #9d6ef8;
+  }
+
+  * { @apply box-border; }
+
+  body {
+    @apply bg-[#060810] text-[#e8eaf0];
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  ::selection { background: rgba(212, 168, 67, 0.25); }
+
+  ::-webkit-scrollbar { @apply w-1.5 h-1.5; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { @apply rounded-full bg-white/10; }
+}
+
+@layer components {
+  .glass-card {
+    @apply rounded-xl border border-white/7 bg-white/[0.02] backdrop-blur-sm;
+  }
+
+  .gold-glow {
+    box-shadow: 0 0 24px rgba(212, 168, 67, 0.2);
+  }
+
+  .font-display {
+    font-family: 'Bebas Neue', sans-serif;
+  }
+
+  .font-mono {
+    font-family: 'DM Mono', monospace;
+  }
+
+  .gradient-border {
+    position: relative;
+  }
+  .gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, rgba(212,168,67,0.4), transparent, rgba(56,217,245,0.2));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    pointer-events: none;
+  }
+}

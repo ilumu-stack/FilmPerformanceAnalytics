@@ -1,0 +1,145 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# FilmIQ — Docker Compose
+# Run from the PROJECT ROOT: filmiq/
+#   docker compose up -d
+#
+# Required env vars (copy .env.example to .env and fill in):
+#   ANTHROPIC_API_KEY   your Anthropic API key
+#   DB_PASSWORD         postgres password (default: filmiq_secret)
+#   JWT_SECRET          random secret (default: dev value — CHANGE IN PRODUCTION)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       filmiq
+      POSTGRES_USER:     filmiq_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-filmiq_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filmiq_user -d filmiq"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL:      postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
+      REDIS_URL:         redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      JWT_SECRET:        ${JWT_SECRET:-filmiq_jwt_dev_secret_change_in_production}
+      ENVIRONMENT:       ${ENVIRONMENT:-production}
+      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
+      ML_MODEL_PATH:     /app/ml/saved_models
+    volumes:
+      - ./ml/predictor.py:/app/ml/predictor.py:ro
+      - ./ml/sentiment.py:/app/ml/sentiment.py:ro
+      - ./ml/__init__.py:/app/ml/__init__.py:ro
+      - model_cache:/app/ml/saved_models
+      - ./data:/app/data:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
+
+  # ── ML Training Worker (optional) ────────────────────────────────────────────
+  ml_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.ml
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
+    volumes:
+      - ./ml:/app/ml
+      - model_cache:/app/ml/saved_models
+      - ./data:/app/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python ml/predictor.py --train data/dataset_1_collected_data.csv
+    profiles:
+      - training
+
+  # ── DB Seeder (run once) ─────────────────────────────────────────────────────
+  seeder:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
+    volumes:
+      - ./data:/app/data:ro
+      - ./ml:/app/ml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python scripts/seed_data.py
+    profiles:
+      - seed
+
+  # ── Next.js Frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+    expose:
+      - "3000"
+
+  # ── Nginx Reverse Proxy ──────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  model_cache:

@@ -1,0 +1,114 @@
+name: FilmIQ CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Backend tests ──────────────────────────────────────────────────────────
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Download NLTK data
+        run: python -c "import nltk; nltk.download('stopwords', quiet=True); nltk.download('punkt', quiet=True)"
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://filmiq_user:test@localhost:5432/filmiq_test
+          JWT_SECRET: test_secret_key_for_ci
+          ANTHROPIC_API_KEY: ""
+          ENVIRONMENT: test
+        run: pytest tests/ -v --tb=short
+
+  # ── Frontend lint & type-check ─────────────────────────────────────────────
+  frontend-check:
+    name: Frontend Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+  # ── Docker build check ─────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-check]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t filmiq-backend:ci ./backend
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=http://localhost:8000 \
+            -t filmiq-frontend:ci ./frontend
+
+  # ── Deploy to production ───────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key:      ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /opt/filmiq
+            git pull origin main
+            docker compose -f docker/docker-compose.yml pull
+            docker compose -f docker/docker-compose.yml up -d --build backend frontend
+            docker compose -f docker/docker-compose.yml exec -T backend alembic upgrade head
+            echo "✅ Deployment complete"

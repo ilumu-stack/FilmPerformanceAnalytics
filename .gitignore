@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# Environment
+.env
+.env.local
+.env.production
+!.env.example
+
+# ML models (large binaries — store in object storage or DVC)
+ml/saved_models/*.pkl
+
+# Node / Next.js
+node_modules/
+.next/
+.nuxt/
+out/
+frontend/.next/
+frontend/node_modules/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.junit.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker
+docker/nginx/certs/
+
+# Data (large files — use DVC or Git LFS)
+data/*.csv
+data/*.json
+
+# Logs
+*.log
+logs/
+
+# Alembic
+backend/__pycache__/
