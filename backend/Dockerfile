@@ -22,5 +22,6 @@ RUN mkdir -p /tmp/filmiq_uploads && mkdir -p /app/ml/saved_models
 
 EXPOSE 8000
 
-# Default: run the API
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Default: run the API. Honors $PORT (Render/Cloud Run inject this; falls
+# back to 8000 for docker-compose, which overrides this CMD anyway).
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2"]
