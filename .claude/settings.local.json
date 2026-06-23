@@ -55,7 +55,11 @@
       "PowerShell(docker version 2>&1)",
       "PowerShell($env:DOCKER_API_VERSION=\"1.47\"; docker ps 2>&1 | Select-Object -First 3)",
       "PowerShell(wsl -d docker-desktop -e sh -c \"docker ps\" 2>&1)",
-      "PowerShell(wsl -d docker-desktop -e sh -c \"cat /var/run/docker.sock 2>/dev/null; ls /var/run/ 2>&1 | head\" 2>&1)"
+      "PowerShell(wsl -d docker-desktop -e sh -c \"cat /var/run/docker.sock 2>/dev/null; ls /var/run/ 2>&1 | head\" 2>&1)",
+      "Bash(venv/Scripts/python -c \"import main; print\\('imports OK'\\)\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/auth/login -H 'Content-Type: application/json' -d '{\"identifier\":\"admin\",\"password\":\"Admin@123\"}')",
+      "Bash(curl -s -X POST http://localhost:8000/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"admin\",\"password\":\"Admin@123\"}')",
+      "Bash(venv/Scripts/python -m uvicorn main:app --port 8000 --log-level info)"
     ]
   }
 }

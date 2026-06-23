@@ -110,5 +110,4 @@ jobs:
             git pull origin main
             docker compose -f docker/docker-compose.yml pull
             docker compose -f docker/docker-compose.yml up -d --build backend frontend
-            docker compose -f docker/docker-compose.yml exec -T backend alembic upgrade head
             echo "✅ Deployment complete"

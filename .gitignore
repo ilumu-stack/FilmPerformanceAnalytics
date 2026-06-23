@@ -30,6 +30,7 @@ node_modules/
 out/
 frontend/.next/
 frontend/node_modules/
+*.tsbuildinfo
 
 # Testing
 .pytest_cache/
@@ -56,5 +57,9 @@ data/*.json
 *.log
 logs/
 
-# Alembic
 backend/__pycache__/
+
+# Firebase service-account keys — NEVER commit these
+*firebase-credentials*.json
+*firebase-adminsdk*.json
+*service-account*.json

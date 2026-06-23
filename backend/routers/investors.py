@@ -1,75 +1,88 @@
 """
-FilmIQ — Investor Intelligence Router
+FilmIQ — Investor Intelligence Router (Firestore edition)
+All endpoints require an authenticated investor (or admin) — see auth_utils.get_current_investor.
 """
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
-from typing import Optional
-from database import get_db
-from models import Movie, Genre
+
+import movie_dataset
+from models import User
+from auth_utils import get_current_investor
 
 router = APIRouter()
 
 
 @router.get("/roi-matrix")
-async def roi_matrix():
-    """Genre risk vs return for investment bubble chart."""
+async def roi_matrix(_investor: User = Depends(get_current_investor)):
+    """Real per-genre ROI and loss-rate, computed from films with budget & revenue data."""
+    stats = movie_dataset.genre_roi_stats()
     return [
-        {"genre":"Adventure","risk":45,"roi":812,"film_count":154,"avg_budget":95},
-        {"genre":"Animation","risk":38,"roi":643,"film_count":82,"avg_budget":80},
-        {"genre":"Family","risk":30,"roi":580,"film_count":79,"avg_budget":70},
-        {"genre":"Action","risk":52,"roi":521,"film_count":192,"avg_budget":110},
-        {"genre":"Science Fiction","risk":60,"roi":490,"film_count":90,"avg_budget":130},
-        {"genre":"Comedy","risk":35,"roi":320,"film_count":115,"avg_budget":45},
-        {"genre":"Romance","risk":28,"roi":210,"film_count":60,"avg_budget":30},
-        {"genre":"Drama","risk":22,"roi":180,"film_count":151,"avg_budget":25},
-        {"genre":"Horror","risk":40,"roi":280,"film_count":76,"avg_budget":15},
-        {"genre":"Thriller","risk":68,"roi":-12,"film_count":130,"avg_budget":55},
+        {
+            "genre":      s["genre"],
+            "roi":        s["avg_roi_pct"],
+            "risk":       s["loss_rate_pct"],  # % of the genre's films that lost money
+            "film_count": s["film_count"],
+            "avg_budget": s["avg_budget_musd"],
+        }
+        for s in stats
     ]
 
 
 @router.get("/opportunities")
-async def investment_opportunities():
-    """AI-scored opportunities with signal type."""
-    return [
-        {"signal":"STRONG BUY","genre":"African Animation/Family","rationale":"Ne Zha 2 hit $2.1B on $80M budget. Zero African equivalents exist. 18% CAGR market.","confidence":0.87,"risk":"LOW","expected_roi":"+500–800%"},
-        {"signal":"BUY","genre":"Pan-African Action","rationale":"Action genre averages $160M globally. Low African representation = massive upside.","confidence":0.78,"risk":"MODERATE","expected_roi":"+300–500%"},
-        {"signal":"ACCUMULATE","genre":"Ugandan Drama/Comedy","rationale":"Local comedy dominates East African screens. Low budgets ($0.5–2M) = outsized ROI potential.","confidence":0.72,"risk":"LOW","expected_roi":"+200–400%"},
-        {"signal":"WATCH","genre":"Nollywood Crossover","rationale":"Nollywood is world's 2nd largest film industry. International co-productions gaining traction.","confidence":0.65,"risk":"MODERATE","expected_roi":"+150–300%"},
-        {"signal":"CAUTION","genre":"African Thriller/Horror","rationale":"Thriller MLR coefficient: -1.12. Cultural resistance to horror content in African markets.","confidence":0.80,"risk":"HIGH","expected_roi":"-20 to +80%"},
-    ]
+async def investment_opportunities(_investor: User = Depends(get_current_investor)):
+    """Investment signals derived from real per-genre ROI/loss-rate — no fabricated rationale."""
+    stats = movie_dataset.genre_roi_stats()
+    opportunities = []
+    for s in stats:
+        roi, loss_rate, count = s["avg_roi_pct"], s["loss_rate_pct"], s["film_count"]
+
+        if roi >= 400:
+            signal = "STRONG BUY"
+        elif roi >= 200:
+            signal = "BUY"
+        elif roi >= 100:
+            signal = "ACCUMULATE"
+        elif roi >= 0:
+            signal = "WATCH"
+        else:
+            signal = "CAUTION"
+
+        risk = "LOW" if loss_rate < 20 else "MODERATE" if loss_rate < 40 else "HIGH"
+        confidence = round(min(0.95, count / 100), 2)
+
+        opportunities.append({
+            "signal":      signal,
+            "genre":       s["genre"],
+            "rationale": (
+                f"{s['genre']} films average {roi}% ROI across {count} titles with "
+                f"budget/revenue data; {loss_rate}% finished at a loss."
+            ),
+            "confidence":   confidence,
+            "risk":         risk,
+            "expected_roi": f"{roi:+.0f}%",
+        })
+
+    order = {"STRONG BUY": 0, "BUY": 1, "ACCUMULATE": 2, "WATCH": 3, "CAUTION": 4}
+    opportunities.sort(key=lambda o: order[o["signal"]])
+    return opportunities
 
 
 @router.get("/top-roi")
-async def top_roi_films(limit: int = Query(10, le=50), db: AsyncSession = Depends(get_db)):
-    try:
-        result = await db.execute(
-            select(Movie)
-            .where(Movie.roi.isnot(None), Movie.budget > 1_000_000)
-            .order_by(desc(Movie.roi))
-            .limit(limit)
-        )
-        movies = result.scalars().all()
-        if movies:
-            return [{"title": m.title, "budget": m.budget, "revenue": m.revenue, "roi": m.roi} for m in movies]
-    except Exception:
-        pass
-    # Seeded
-    return [
-        {"title":"Ne Zha 2","budget":80000000,"revenue":2123000000,"roi":2553.8},
-        {"title":"Avatar","budget":237000000,"revenue":2923706026,"roi":1133.6},
-        {"title":"Titanic","budget":200000000,"revenue":2264162353,"roi":1032.1},
-        {"title":"Jurassic World","budget":150000000,"revenue":1670516444,"roi":1013.7},
-        {"title":"The Lion King (2019)","budget":250000000,"revenue":1663075401,"roi":565.2},
-        {"title":"Avengers: Endgame","budget":356000000,"revenue":2799439100,"roi":686.4},
-        {"title":"The Avengers","budget":220000000,"revenue":1519557910,"roi":590.7},
-        {"title":"Star Wars: TFA","budget":245000000,"revenue":2068223624,"roi":744.2},
-    ]
+async def top_roi_films(limit: int = Query(10, le=50), _investor: User = Depends(get_current_investor)):
+    """Real highest-ROI films in the dataset (budget and revenue both present)."""
+    return movie_dataset.top_roi_films(limit=limit)
 
 
 @router.get("/africa-outlook")
-async def africa_outlook():
+async def africa_outlook(_investor: User = Depends(get_current_investor)):
+    """
+    No African-market dataset (size, CAGR, country breakdown, streaming-vs-cinema
+    trend) exists anywhere in this repo — the TMDB CSV has no country-of-market or
+    distribution-channel data. These figures are external industry estimates, NOT
+    computed from movie_dataset.py. Marked explicitly so the frontend doesn't
+    present them as live analytics like the other investor endpoints.
+    """
     return {
+        "data_source": "illustrative_estimate_not_computed",
         "cagr": 18.0,
         "current_market_size_usd": 640_000_000,
         "projected_2030_usd": 2_100_000_000,
@@ -97,11 +110,10 @@ async def africa_outlook():
             {"year":"2023","cinema":102,"streaming":140},
             {"year":"2024","cinema":112,"streaming":158},
             {"year":"2025","cinema":118,"streaming":175},
-        ]
+        ],
     }
 
 
-# Module-level lazy singleton — same pattern as predictions.py
 _sim_predictor = None
 
 def _get_predictor():
@@ -114,17 +126,27 @@ def _get_predictor():
 
 @router.get("/simulate")
 async def simulate_portfolio(
-    genre:  str   = Query("Action"),
-    budget: float = Query(5_000_000),
-    market: str   = Query("pan_african"),
+    genre:          str   = Query("Action"),
+    budget:         float = Query(5_000_000),
+    market:         str   = Query("pan_african"),
+    season:         str   = Query("summer"),
+    director_score: float = Query(0.5, ge=0.0, le=1.0),
+    cast_score:     float = Query(0.5, ge=0.0, le=1.0),
+    _investor:      User  = Depends(get_current_investor),
 ):
-    """Quick portfolio simulation without auth."""
-    result = _get_predictor().predict({"budget": budget, "genre": genre, "market": market,
-                                       "director_score": 0.6, "cast_score": 0.6, "season": "summer"})
+    result = _get_predictor().predict({
+        "budget": budget, "genre": genre, "market": market, "season": season,
+        "director_score": director_score, "cast_score": cast_score,
+    })
     return {
-        "input":  {"genre": genre, "budget": budget, "market": market},
-        "output": {"predicted_revenue": result["predicted_revenue"],
-                   "roi": result["predicted_roi"],
-                   "risk": result["risk_level"],
-                   "recommendation": result["recommendation"]},
+        "input":  {
+            "genre": genre, "budget": budget, "market": market, "season": season,
+            "director_score": director_score, "cast_score": cast_score,
+        },
+        "output": {
+            "predicted_revenue": result["predicted_revenue"],
+            "roi":               result["predicted_roi"],
+            "risk":              result["risk_level"],
+            "recommendation":    result["recommendation"],
+        },
     }

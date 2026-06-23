@@ -7,8 +7,10 @@ import { cn } from '@/lib/utils'
 
 // ── Badge style map ────────────────────────────────────────────────────────
 const BADGE_STYLES: Record<string, string> = {
-  gold:   'badge-gold',
-  cyan:   'badge-cyan',
+  gold:   'badge-amber',
+  amber:  'badge-amber',
+  cyan:   'badge-blue',
+  blue:   'badge-blue',
   green:  'badge-green',
   purple: 'badge-purple',
   red:    'badge-red',
@@ -28,21 +30,23 @@ export function ChartCard({
   title,
   subtitle,
   badge,
-  badgeColor = 'gold',
+  badgeColor = 'blue',
   className,
   children,
 }: ChartCardProps) {
   return (
-    <div className={cn('glass-card p-6', className)}>
-      <div className="mb-5 flex items-start justify-between">
+    <div className={cn('card p-6', className)}>
+      <div className="mb-5 flex items-start justify-between gap-4">
         <div>
-          <h3 className="font-display text-lg tracking-wide text-white">{title}</h3>
+          <h3 className="text-[15px] font-semibold text-navy">{title}</h3>
           {subtitle && (
-            <p className="mt-0.5 text-xs text-gray-500">{subtitle}</p>
+            <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>
           )}
         </div>
         {badge && (
-          <span className={BADGE_STYLES[badgeColor] ?? 'badge-gold'}>{badge}</span>
+          <span className={cn('flex-shrink-0', BADGE_STYLES[badgeColor] ?? 'badge-blue')}>
+            {badge}
+          </span>
         )}
       </div>
       {children}
@@ -55,7 +59,6 @@ interface KpiCardProps {
   label:   string
   value:   string
   change?: string
-  /** When true change text is green; false = red; undefined = green (default) */
   up?:     boolean
   color:   string
   icon:    LucideIcon
@@ -76,17 +79,22 @@ export function KpiCard({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay, duration: 0.4 }}
-      className="relative overflow-hidden rounded-xl border border-white/[0.07]
-                 bg-white/[0.02] p-5 transition-colors hover:border-white/[0.12]"
+      className="relative overflow-hidden rounded-xl border border-slate-200 bg-white p-5
+                 shadow-card transition-shadow hover:shadow-card-hover"
     >
       <div className="mb-3 flex items-center gap-2">
-        <Icon size={13} style={{ color }} />
-        <span className="text-[11px] font-semibold uppercase tracking-[2px] text-gray-500">
+        <div
+          className="flex h-8 w-8 items-center justify-center rounded-lg"
+          style={{ background: `${color}18` }}
+        >
+          <Icon size={15} style={{ color }} />
+        </div>
+        <span className="text-[11px] font-semibold uppercase tracking-[2px] text-slate-400">
           {label}
         </span>
       </div>
       <div
-        className="mb-2 font-display text-3xl leading-none tracking-wide"
+        className="mb-2 text-3xl font-bold leading-none"
         style={{ color }}
       >
         {value}
@@ -95,14 +103,15 @@ export function KpiCard({
         <div
           className={cn(
             'text-xs font-medium',
-            up === false ? 'text-red-400' : 'text-emerald-400',
+            up === false ? 'text-red-500' : 'text-emerald-600',
           )}
         >
           {change}
         </div>
       )}
+      {/* Accent bar at bottom */}
       <div
-        className="absolute bottom-0 left-0 right-0 h-[2px] opacity-25"
+        className="absolute bottom-0 left-0 right-0 h-[3px] opacity-30"
         style={{ background: `linear-gradient(90deg, ${color}, transparent)` }}
       />
     </motion.div>

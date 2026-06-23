@@ -256,8 +256,11 @@ class FilmSentimentAnalyzer:
         text = re.sub(r"[^\w\s']", " ", text)
         tokens = text.split()
         if HAS_NLTK:
-            stop = set(stopwords.words("english")) - NEGATORS
-            tokens = [t for t in tokens if t not in stop]
+            try:
+                stop = set(stopwords.words("english")) - NEGATORS
+                tokens = [t for t in tokens if t not in stop]
+            except LookupError:
+                pass  # corpus not downloaded on this host — fall back to unfiltered tokens
         return tokens
 
     def _get_level(self, days_before: int) -> tuple:

@@ -1,0 +1,101 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ──────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && userDoc().role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isFilmmaker() {
+      return hasRole('filmmaker');
+    }
+
+    function isInvestor() {
+      return hasRole('investor');
+    }
+
+    function isActiveUser() {
+      return isSignedIn() && userDoc().is_active == true;
+    }
+
+    // ── users collection ──────────────────────────────────────────────────
+    // Admins can read/write all users.
+    // Regular users can only read their own document.
+    // No user can write their own role field (role changes go through admin).
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+
+      allow create: if isAdmin();
+
+      allow update: if isAdmin() ||
+        // Users can update their own non-sensitive fields (password, profile)
+        (isSignedIn() && request.auth.uid == userId &&
+         !('role' in request.resource.data.diff(resource.data).affectedKeys()) &&
+         !('is_active' in request.resource.data.diff(resource.data).affectedKeys()));
+
+      allow delete: if isAdmin();
+    }
+
+    // ── filmmaker_movies collection ───────────────────────────────────────
+    // All authenticated active users can read movies.
+    // Filmmakers can create; only the owning filmmaker (or admin) can update/delete.
+    match /filmmaker_movies/{movieId} {
+      allow read: if isActiveUser();
+
+      allow create: if isActiveUser() && (isFilmmaker() || isAdmin()) &&
+        request.resource.data.filmmaker_id == request.auth.uid;
+
+      allow update: if isActiveUser() &&
+        (isAdmin() || (isFilmmaker() && resource.data.filmmaker_id == request.auth.uid));
+
+      allow delete: if isActiveUser() &&
+        (isAdmin() || (isFilmmaker() && resource.data.filmmaker_id == request.auth.uid));
+    }
+
+    // ── predictions collection ────────────────────────────────────────────
+    // Users can only read/write their own predictions; admins can read all.
+    match /predictions/{predId} {
+      allow read: if isActiveUser() &&
+        (isAdmin() || resource.data.user_id == request.auth.uid);
+
+      allow create: if isActiveUser() &&
+        request.resource.data.user_id == request.auth.uid;
+
+      allow update, delete: if isActiveUser() &&
+        (isAdmin() || resource.data.user_id == request.auth.uid);
+    }
+
+    // ── reports collection ────────────────────────────────────────────────
+    match /reports/{reportId} {
+      allow read:  if isActiveUser() && (isAdmin() || resource.data.user_id == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    // ── analytics / read-only collections ────────────────────────────────
+    // These are populated server-side only; clients read only.
+    match /analytics/{doc=**} {
+      allow read:  if isActiveUser();
+      allow write: if isAdmin();
+    }
+
+    // ── Deny everything else ──────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,11 +1,12 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Cpu, ChevronRight, Send } from 'lucide-react'
-import { predictions as predictAPI, chat as chatAPI } from '@/lib/api'
+import { predictions as predictAPI, chat as chatAPI, analytics } from '@/lib/api'
 import { formatMoney, formatROI, riskBadgeClass } from '@/lib/utils'
-import type { PredictionResult } from '@/lib/api'
+import type { PredictionResult, GenreStat } from '@/lib/api'
 import toast from 'react-hot-toast'
 
 interface Message {
@@ -27,23 +28,35 @@ const MARKETS = [
   { v: 'global',       l: 'Global'        },
 ]
 
-const FEATURE_ROWS = [
-  { label: 'Positive Comments',   val: '+1.862', color: 'text-emerald-400', pct: 90  },
-  { label: 'First-day Box Office', val: '+1.222', color: 'text-yellow-400',  pct: 100 },
-  { label: 'Actors Score',         val: '+1.216', color: 'text-cyan-400',    pct: 80  },
-  { label: 'Intended Audience',    val: '+0.962', color: 'text-cyan-400',    pct: 65  },
-  { label: 'Heat / Search Index',  val: '+0.861', color: 'text-purple-400',  pct: 58  },
-  { label: 'Negative Comments',    val: '−2.369', color: 'text-red-400',     pct: 95  },
+// Real coefficients from ml/predictor.py's analytical formula — only the four
+// terms actually used in _analytical_predict() are listed. (The previous
+// version also listed "First-day Box Office", "Intended Audience", and "Heat /
+// Search Index" rows with invented coefficients that don't correspond to any
+// term in that formula — those request fields exist but aren't weighted there.)
+const PREDICTOR_COEFFICIENTS = [
+  { label: 'Negative Comments', value: -2.369,  color: 'text-red-400'     },
+  { label: 'Positive Comments', value:  1.862,  color: 'text-emerald-400' },
+  { label: 'Actors Score',      value:  1.2157, color: 'text-brand'       },
+  { label: 'Director Score',    value:  1.02198, color: 'text-purple-400' },
 ]
+const MAX_ABS_COEFFICIENT = Math.max(...PREDICTOR_COEFFICIENTS.map((c) => Math.abs(c.value)))
+const FEATURE_ROWS = PREDICTOR_COEFFICIENTS.map((c) => ({
+  label: c.label,
+  val:   `${c.value >= 0 ? '+' : ''}${c.value.toFixed(3)}`,
+  color: c.color,
+  pct:   Math.round((Math.abs(c.value) / MAX_ABS_COEFFICIENT) * 100),
+}))
 
 const INITIAL_MESSAGES: Message[] = [
   {
     role:    'assistant',
-    content: "Welcome to FilmIQ Analyst. Ask me about box office trends, African market insights, genre performance, or investment opportunities.",
+    content: "Welcome to FilmIQ Analyst. Ask me about box office trends, Ugandan market insights, genre performance, or investment opportunities.",
   },
 ]
 
 export default function PredictPage() {
+  const searchParams = useSearchParams()
+
   const [form, setForm] = useState({
     title:          '',
     budget:         5_000_000,
@@ -53,17 +66,45 @@ export default function PredictPage() {
     season:         'summer',
     market:         'pan_african',
     logline:        '',
+    comments:       '',
   })
+  const [movieId,     setMovieId]     = useState<string | undefined>(undefined)
   const [result,      setResult]      = useState<PredictionResult | null>(null)
   const [loading,     setLoading]     = useState(false)
   const [messages,    setMessages]    = useState<Message[]>(INITIAL_MESSAGES)
   const [chatInput,   setChatInput]   = useState('')
   const [chatLoading, setChatLoading] = useState(false)
+  const [realFacts,   setRealFacts]   = useState<{ genres: GenreStat[]; bestModel: string | null; bestR2: number | null }>({
+    genres: [], bestModel: null, bestR2: null,
+  })
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Prefill from a filmmaker's "Run Prediction for this Movie" link
+  useEffect(() => {
+    const movie_id = searchParams.get('movie_id')
+    const title     = searchParams.get('title')
+    const genre     = searchParams.get('genre')
+    const budget    = searchParams.get('budget')
+    if (movie_id) setMovieId(movie_id)
+    setForm((f) => ({
+      ...f,
+      ...(title  ? { title } : {}),
+      ...(genre  ? { genre } : {}),
+      ...(budget ? { budget: Number(budget) } : {}),
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Real facts for the chat fallback — fetched once, never hardcoded
+  useEffect(() => {
+    Promise.all([analytics.genreAnalytics(), analytics.modelAccuracy()])
+      .then(([genres, acc]) => setRealFacts({ genres, bestModel: acc.best_model, bestR2: acc.best_r2 }))
+      .catch(() => {})
+  }, [])
 
   // Generic setter for text/select fields
   const handleChange =
@@ -84,7 +125,17 @@ export default function PredictPage() {
     setLoading(true)
     setResult(null)
     try {
-      const res = await predictAPI.predict(form)
+      const { comments, ...rest } = form
+      const review_comments = comments
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((text) => ({ text }))
+      const res = await predictAPI.predict({
+        ...rest,
+        ...(review_comments.length ? { review_comments } : {}),
+        ...(movieId ? { movie_id: movieId } : {}),
+      })
       setResult(res)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Prediction failed'
@@ -127,15 +178,23 @@ export default function PredictPage() {
     }
   }
 
+  // Every figure here comes from realFacts (fetched from /api/analytics/* —
+  // real, computed dataset numbers), never a hardcoded claim. There is no
+  // Ugandan-market dataset in this product, so we say so rather than invent one.
   function getFallbackResponse(q: string): string {
     const lower = q.toLowerCase()
+    const topGenres = [...realFacts.genres].sort((a, b) => b.avg_revenue - a.avg_revenue).slice(0, 3)
+    const genreLine = topGenres.length
+      ? topGenres.map((g) => `${g.genre} ($${(g.avg_revenue / 1e6).toFixed(0)}M avg)`).join(', ')
+      : 'genre data is still loading'
+
     if (lower.includes('africa') || lower.includes('uganda'))
-      return 'The African film market grows at 18% CAGR, projected to reach $2.1B by 2030. Uganda leads East Africa with 3 major multiplex operators. Pan-African content targeting all 54 nations offers the best scale.'
-    if (lower.includes('genre'))
-      return 'From 9,999 films: Adventure leads at $226M avg revenue, Family $195M, Sci-Fi $183M. Thriller underperforms (MLR coeff −1.12). Comedy and Romance offer low-risk, moderate-return profiles.'
-    if (lower.includes('roi') || lower.includes('invest'))
-      return 'Highest ROI: Ne Zha 2 (+2,554%), Avatar (+1,134%), Titanic (+1,032%). Pattern: family/animation content + strategic summer release + pan-African distribution maximizes returns.'
-    return 'FilmIQ has analyzed 9,999 TMDB films. CNN-C model achieves 83.7% accuracy. Key finding: adding comment sentiment data improves box office prediction by 11.8–16.1% (Zhang et al., 2024).'
+      return `This dataset has no Ugandan-market sizing or CAGR data, so I can't give a real figure for that. From the films we do have: ${genreLine}.`
+    if (lower.includes('genre') || lower.includes('roi') || lower.includes('invest'))
+      return `Highest-revenue genres in the dataset: ${genreLine}.`
+    if (realFacts.bestModel)
+      return `FilmIQ's ${realFacts.bestModel} model achieves R²=${realFacts.bestR2}% on this dataset's box-office regression task.`
+    return `Highest-revenue genres in the dataset: ${genreLine}.`
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -143,24 +202,22 @@ export default function PredictPage() {
     <div className="min-h-screen px-8 py-8">
       <div className="mb-8">
         <p className="section-label mb-1">AI Engine</p>
-        <h1 className="font-display text-5xl tracking-widest">PREDICTION STUDIO</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          CNN-C Model · 83.7% Accuracy · Powered by Claude AI
+        <h1 className="text-4xl font-bold text-navy">Prediction Studio</h1>
+        <p className="mt-1 text-sm text-slate-400">
+          CNN-C Model{realFacts.bestR2 != null ? ` · ${realFacts.bestR2}% Accuracy (R²)` : ''} · Powered by Claude AI
         </p>
       </div>
 
       <div className="grid grid-cols-2 gap-6">
         {/* ── Prediction Form ─────────────────────────────────────────────── */}
-        <div className="rounded-xl border border-yellow-400/15 bg-gradient-to-br from-yellow-400/[0.03] to-cyan-400/[0.02] p-6">
+        <div className="card p-6">
           <div className="mb-5 flex items-center gap-3">
             <span className="relative flex h-2.5 w-2.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
             </span>
-            <h2 className="font-display text-xl tracking-wide">BOX OFFICE PREDICTOR</h2>
-            <span className="ml-auto rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
-              CNN-C v1.0
-            </span>
+            <h2 className="text-lg font-semibold text-navy">Box Office Predictor</h2>
+            <span className="ml-auto badge-green font-mono">CNN-C v1.0</span>
           </div>
 
           <div className="space-y-4">
@@ -202,7 +259,7 @@ export default function PredictPage() {
                   type="range" min="0" max="1" step="0.1"
                   value={form.director_score}
                   onChange={handleRange('director_score')}
-                  className="w-full cursor-pointer accent-yellow-400"
+                  className="w-full cursor-pointer accent-brand"
                 />
               </Field>
               <Field label={`Cast Score: ${form.cast_score.toFixed(1)}`}>
@@ -210,7 +267,7 @@ export default function PredictPage() {
                   type="range" min="0" max="1" step="0.1"
                   value={form.cast_score}
                   onChange={handleRange('cast_score')}
-                  className="w-full cursor-pointer accent-yellow-400"
+                  className="w-full cursor-pointer accent-brand"
                 />
               </Field>
             </div>
@@ -241,6 +298,22 @@ export default function PredictPage() {
               />
             </Field>
 
+            <Field label="Audience Comments (optional — one per line)">
+              <textarea
+                className="input-field"
+                rows={3}
+                placeholder={'Scored by the real sentiment pipeline and fed into the prediction.\ne.g. "Amazing trailer, can\'t wait!"'}
+                value={form.comments}
+                onChange={(e) => setForm((f) => ({ ...f, comments: e.target.value }))}
+              />
+            </Field>
+
+            {movieId && (
+              <p className="text-[11px] text-slate-400">
+                Linked to your filmmaker movie — this prediction will appear in its analytics.
+              </p>
+            )}
+
             <button
               onClick={runPrediction}
               disabled={loading}
@@ -264,38 +337,49 @@ export default function PredictPage() {
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
-                className="mt-5 overflow-hidden rounded-lg border border-white/[0.06] bg-black/30 p-4"
+                className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-4"
               >
                 <div className="mb-3 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-[2px] text-gray-500">
+                  <span className="text-[11px] font-semibold uppercase tracking-[2px] text-slate-500">
                     Prediction Results
                   </span>
                   <span className={riskBadgeClass(result.risk_level)}>
                     {result.risk_level} RISK
                   </span>
                 </div>
-                <ResultRow label="Predicted Revenue"  value={formatMoney(result.predicted_revenue, true)}          color="text-yellow-400" />
-                <ResultRow label="Opening Weekend"    value={formatMoney(result.predicted_opening_weekend, true)}  color="text-cyan-400" />
+                <ResultRow label="Predicted Revenue"  value={formatMoney(result.predicted_revenue, true)}          color="text-brand font-bold" />
+                <ResultRow label="Opening Weekend"    value={formatMoney(result.predicted_opening_weekend, true)}  color="text-purple-600" />
                 <ResultRow
                   label="Estimated ROI"
                   value={formatROI(result.predicted_roi)}
-                  color={result.predicted_roi > 0 ? 'text-emerald-400' : 'text-red-400'}
+                  color={result.predicted_roi > 0 ? 'text-emerald-600' : 'text-red-600'}
                 />
                 <ResultRow label="Genre Multiplier"  value={`${result.genre_multiplier.toFixed(2)}x`}              color="text-purple-400" />
                 <ResultRow label="Model Confidence"  value={`${((result.confidence ?? 0.837) * 100).toFixed(1)}%`} />
+                {result.sentiment_analysis && (
+                  <ResultRow
+                    label="Audience Sentiment"
+                    value={`${result.sentiment_analysis.sentiment_label} (${result.sentiment_analysis.positive_count}+ / ${result.sentiment_analysis.negative_count}− of ${result.sentiment_analysis.total_comments})`}
+                    color={
+                      result.sentiment_analysis.sentiment_label === 'positive' ? 'text-emerald-600'
+                      : result.sentiment_analysis.sentiment_label === 'negative' ? 'text-red-600'
+                      : undefined
+                    }
+                  />
+                )}
                 {result.ai_analysis && (
-                  <div className="mt-3 border-t border-white/[0.06] pt-3">
-                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[2px] text-gray-500">
+                  <div className="mt-3 border-t border-slate-200 pt-3">
+                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[2px] text-slate-500">
                       AI Analysis
                     </p>
-                    <p className="whitespace-pre-wrap text-xs leading-relaxed text-gray-300">
+                    <p className="whitespace-pre-wrap text-xs leading-relaxed text-slate-600">
                       {result.ai_analysis}
                     </p>
                   </div>
                 )}
-                <div className="mt-3 flex items-start gap-2 border-t border-white/[0.06] pt-3">
-                  <ChevronRight size={14} className="mt-0.5 shrink-0 text-yellow-400" />
-                  <p className="text-xs text-gray-400">{result.recommendation}</p>
+                <div className="mt-3 flex items-start gap-2 border-t border-slate-200 pt-3">
+                  <ChevronRight size={14} className="mt-0.5 shrink-0 text-brand" />
+                  <p className="text-xs text-slate-400">{result.recommendation}</p>
                 </div>
               </motion.div>
             )}
@@ -306,17 +390,17 @@ export default function PredictPage() {
         <div className="flex flex-col gap-4">
           {/* Chat */}
           <div
-            className="flex flex-col overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]"
+            className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card"
             style={{ maxHeight: 420 }}
           >
-            <div className="flex items-center gap-3 border-b border-white/[0.07] px-5 py-3">
+            <div className="flex items-center gap-3 border-b border-slate-200 px-5 py-3">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
               </span>
               <div>
-                <div className="font-display text-base tracking-wide">FILMIQ ANALYST</div>
-                <div className="text-[10px] text-gray-500">AI-powered film intelligence</div>
+                <div className="font-semibold text-navy">FilmIQ Analyst</div>
+                <div className="text-[10px] text-slate-400">AI-powered film intelligence</div>
               </div>
             </div>
 
@@ -332,10 +416,10 @@ export default function PredictPage() {
                   <div
                     className={`max-w-[85%] rounded-xl px-4 py-2.5 text-xs leading-relaxed ${
                       m.role === 'user'
-                        ? 'border border-yellow-400/20 bg-yellow-400/10 text-yellow-100'
+                        ? 'border border-brand-200 bg-brand-50 text-navy font-medium'
                         : m.role === 'thinking'
-                        ? 'border border-white/[0.07] bg-white/[0.02] italic text-gray-500'
-                        : 'border border-white/[0.07] bg-white/[0.02] text-gray-200'
+                        ? 'border border-slate-200 bg-slate-50 italic text-slate-400'
+                        : 'border border-slate-200 bg-slate-50 text-slate-700'
                     }`}
                   >
                     {m.content}
@@ -345,10 +429,10 @@ export default function PredictPage() {
               <div ref={chatEndRef} />
             </div>
 
-            <div className="flex gap-2 border-t border-white/[0.07] p-3">
+            <div className="flex gap-2 border-t border-slate-200 p-3">
               <input
                 className="input-field flex-1 text-xs"
-                placeholder="Ask about box office, genres, African market..."
+                placeholder="Ask about box office, genres, Ugandan market..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') sendChat() }}
@@ -356,7 +440,7 @@ export default function PredictPage() {
               <button
                 onClick={sendChat}
                 disabled={chatLoading}
-                className="flex h-9 w-9 items-center justify-center rounded-lg bg-yellow-400 text-black transition hover:bg-yellow-300 disabled:opacity-50"
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand text-white transition hover:bg-brand-dark disabled:opacity-50"
               >
                 <Send size={14} />
               </button>
@@ -364,19 +448,19 @@ export default function PredictPage() {
           </div>
 
           {/* Feature importance */}
-          <div className="glass-card p-5">
-            <h3 className="mb-1 font-display text-base tracking-wide">FEATURE IMPORTANCE</h3>
-            <p className="mb-4 text-[11px] text-gray-500">
+          <div className="card p-5">
+            <h3 className="mb-1 text-base font-semibold text-navy">Feature Importance</h3>
+            <p className="mb-4 text-[11px] text-slate-400">
               MLR regression coefficients — Zhang et al. (2024) Table 6
             </p>
             <div className="space-y-3">
               {FEATURE_ROWS.map((f) => (
                 <div key={f.label}>
                   <div className="mb-1 flex justify-between text-xs">
-                    <span className="text-gray-400">{f.label}</span>
+                    <span className="text-slate-500">{f.label}</span>
                     <span className={`font-mono font-medium ${f.color}`}>{f.val}</span>
                   </div>
-                  <div className="h-1 rounded-full bg-white/[0.06]">
+                  <div className="h-1 rounded-full bg-slate-200">
                     <div
                       className="h-full rounded-full opacity-70"
                       style={{
@@ -403,7 +487,7 @@ export default function PredictPage() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[2px] text-gray-500">
+      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[2px] text-slate-500">
         {label}
       </label>
       {children}
@@ -421,9 +505,9 @@ function ResultRow({
   color?: string
 }) {
   return (
-    <div className="flex items-center justify-between border-b border-white/[0.04] py-2 last:border-0">
-      <span className="text-xs text-gray-500">{label}</span>
-      <span className={`font-mono text-sm font-medium ${color ?? 'text-white'}`}>{value}</span>
+    <div className="flex items-center justify-between border-b border-slate-100 py-2 last:border-0">
+      <span className="text-xs text-slate-500">{label}</span>
+      <span className={`font-mono text-sm font-medium ${color ?? 'text-slate-800'}`}>{value}</span>
     </div>
   )
 }

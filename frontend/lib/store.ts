@@ -22,41 +22,49 @@ export interface AuthUser {
 }
 
 interface AuthState {
-  user:      AuthUser | null
-  isAuthed:  boolean
-  _hydrated: boolean
-  login:     (user: AuthUser, access: string, refresh: string) => void
-  logout:    () => void
-  setUser:   (user: AuthUser) => void
-  setHydrated: () => void
+  user:          AuthUser | null
+  isAuthed:      boolean
+  mustChangePw:  boolean   // true → middleware blocks all routes except /auth/change-password
+  _hydrated:     boolean
+  login:         (user: AuthUser, access: string, refresh: string, mustChangePw?: boolean) => void
+  logout:        () => void
+  setUser:       (user: AuthUser) => void
+  setHydrated:   () => void
+  /** Call after a successful change-password to store the freshly issued tokens */
+  updateTokens:  (access: string, refresh: string) => void
 }
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      user:      null,
-      isAuthed:  false,
-      _hydrated: false,
+      user:         null,
+      isAuthed:     false,
+      mustChangePw: false,
+      _hydrated:    false,
 
-      login: (user, access, refresh) => {
+      login: (user, access, refresh, mustChangePw = false) => {
         setToken(access)
         setRefresh(refresh)
-        set({ user, isAuthed: true })
+        set({ user, isAuthed: true, mustChangePw })
       },
 
       logout: () => {
         removeToken()
-        set({ user: null, isAuthed: false })
+        set({ user: null, isAuthed: false, mustChangePw: false })
       },
 
-      setUser: (user) => set({ user, isAuthed: true }),
+      setUser:    (user) => set({ user, isAuthed: true }),
+      setHydrated: ()   => set({ _hydrated: true }),
 
-      setHydrated: () => set({ _hydrated: true }),
+      updateTokens: (access, refresh) => {
+        setToken(access)
+        setRefresh(refresh)
+        set({ mustChangePw: false })
+      },
     }),
     {
       name:    'filmiq-auth',
       storage: createJSONStorage(() => {
-        // Safe SSR: return a no-op storage when window is not available
         if (typeof window === 'undefined') {
           return {
             getItem:    () => null,
@@ -66,9 +74,7 @@ export const useAuthStore = create<AuthState>()(
         }
         return localStorage
       }),
-      partialize: (s) => ({ user: s.user, isAuthed: s.isAuthed }),
-      // Prevent automatic rehydration to avoid SSR mismatch.
-      // ClientProviders calls useAuthStore.persist.rehydrate() on mount.
+      partialize: (s) => ({ user: s.user, isAuthed: s.isAuthed, mustChangePw: s.mustChangePw }),
       skipHydration: true,
     },
   ),

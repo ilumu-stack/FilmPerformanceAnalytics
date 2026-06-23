@@ -2,18 +2,18 @@
 FilmIQ — Sentiment Analysis Router
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from ml.sentiment import analyze_text, analyze_batch
 
 router = APIRouter()
 
 class SingleComment(BaseModel):
-    text:        str
+    text:        str = Field(..., max_length=2000)
     days_before: Optional[int] = None
 
 class BatchRequest(BaseModel):
-    comments: List[SingleComment]
+    comments: List[SingleComment] = Field(..., max_length=200)
     build_corpus: bool = True
 
 @router.post("/analyze")

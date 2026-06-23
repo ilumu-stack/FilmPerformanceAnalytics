@@ -80,7 +80,7 @@ export default nextConfig
 {
   "name": "filmiq-frontend",
   "version": "1.0.0",
-  "description": "FilmIQ — African Cinema Intelligence Platform Frontend",
+  "description": "FilmIQ — Uganda's Cinema Intelligence Platform Frontend",
   "private": true,
   "scripts": {
     "dev":   "next dev",

@@ -1,8 +1,8 @@
-# FilmIQ — African Cinema Intelligence Platform
+# FilmIQ — Uganda's Cinema Intelligence Platform
 
-> *Data-Driven Intelligence for African Cinema*
+> *Data-Driven Intelligence for Ugandan Cinema*
 
-A full-stack film analytics platform powered by AI, Business Intelligence, and predictive machine learning. Built for the Ugandan and African film industry.
+A full-stack film analytics platform powered by AI, Business Intelligence, and predictive machine learning. Built for the Ugandan film industry.
 
 ---
 
@@ -10,10 +10,13 @@ A full-stack film analytics platform powered by AI, Business Intelligence, and p
 
 | Page | Description |
 |------|-------------|
-| **Dashboard** | Revenue analytics, KPIs, genre performance, top films from 9,999-film dataset |
+| **Dashboard** | Revenue analytics, KPIs, genre performance, top films from the 4,803-film TMDb dataset |
 | **AI Predictor** | Box office prediction using CNN-C methodology (83.7% accuracy) + Claude AI |
 | **Analytics Studio** | Interactive BI — scatter, trend, seasonal, and language drill-downs |
-| **Investor Intel** | ROI matrix, risk analysis, African market growth projections |
+| **Movies / Genres / People / Trends / Overview / Compare** | Catalog browsing, cross-genre and cross-title comparisons |
+| **Investor Intel** | ROI matrix, risk analysis, illustrative African market benchmarks |
+| **Data Portal** | Submit structured datasets (box office, streaming, audience research, marketing, production, custom) via a CSV upload wizard — column mapping, validation, and an admin review/approve workflow |
+| **Admin Panel** | User management, account bootstrap |
 
 ---
 
@@ -65,24 +68,29 @@ F_total = Σ(T_V × weight_V)
 
 ```
 filmiq/
-├── backend/                    # FastAPI backend
+├── backend/                    # FastAPI backend (Firestore edition)
 │   ├── main.py                 # Application entry point
-│   ├── models.py               # SQLAlchemy ORM models
-│   ├── database.py             # Async PostgreSQL connection
+│   ├── models.py               # Pydantic models
+│   ├── firebase_db.py          # Firestore client
 │   ├── config.py               # Settings (env vars)
-│   ├── auth_utils.py           # JWT authentication
+│   ├── auth_utils.py           # Password hashing / JWT helpers
+│   ├── tmdb_service.py         # TMDb poster/backdrop lookups
+│   ├── movie_dataset.py        # Dataset loading helpers
+│   ├── analytics_service.py    # Analytics aggregation
 │   └── routers/
-│       ├── auth.py             # Login, register, refresh
+│       ├── auth.py             # Login, refresh, change-password (self-registration disabled)
 │       ├── movies.py           # CRUD + search
 │       ├── predictions.py      # AI prediction endpoints
 │       ├── analytics.py        # Dashboard analytics
 │       ├── sentiment.py        # Comment scoring
-│       └── investors.py        # ROI & risk intelligence
+│       ├── investors.py        # ROI & risk intelligence
+│       ├── admin.py            # User management
+│       ├── chat.py             # AI chat
+│       └── data_portal.py      # Data Portal: templates, submissions, validation, review
 │
 ├── ml/
 │   ├── predictor.py            # Main CNN-C predictor + training pipeline
 │   ├── sentiment.py            # TF-IDF sentiment analysis
-│   ├── feature_engineering.py  # Dataset preprocessing
 │   └── saved_models/           # Pickled trained models
 │
 ├── frontend/                   # Next.js 14 frontend (TypeScript)
@@ -91,27 +99,42 @@ filmiq/
 │   │   ├── dashboard/
 │   │   ├── predict/
 │   │   ├── analytics/
-│   │   └── investor/
+│   │   ├── investor/
+│   │   ├── movies/, genres/, people/, trends/, overview/, compare/
+│   │   ├── filmmaker/           # Data Portal: dashboard, submit/ wizard, submissions/[id]
+│   │   ├── admin/
+│   │   └── auth/                # login, register, change-password, forgot-password
 │   ├── components/
-│   │   ├── charts/             # Recharts/ECharts wrappers
-│   │   ├── ui/                 # ShadCN components
-│   │   └── dashboard/          # Dashboard-specific widgets
+│   │   ├── NavBar.tsx
+│   │   ├── ClientProviders.tsx
+│   │   ├── data-portal/         # SubmissionTable, ActivityFeed, ValidationPanel, UploadWizard
+│   │   └── ui/                 # Cards, tooltips, poster/backdrop image components
 │   └── lib/
 │       ├── api.ts              # API client
+│       ├── store.ts            # Client-side state
 │       └── types.ts            # TypeScript types
 │
 ├── docker/
-│   ├── docker-compose.yml
-│   ├── nginx/nginx.conf
-│   └── postgres/init.sql
+│   ├── docker-compose.yml      # Alternate compose file (run from docker/)
+│   └── nginx/nginx.conf        # Reverse proxy config, used by the root docker-compose.yml
 │
-├── data/
-│   └── dataset_1_collected_data.csv   # TMDB 9,999-film dataset
-│
-└── docs/
-    ├── API.md                  # Full API documentation
-    └── DEPLOYMENT.md           # Production deployment guide
+└── data/
+    └── movie_dataset.csv       # Movie dataset
 ```
+
+---
+
+## 🗄 Database (Firebase Firestore)
+
+The backend stores data in Firebase Firestore — there's no local database server to run. Configure credentials via **one** of:
+
+| Option | Env var(s) | Use case |
+|--------|-----------|----------|
+| Service-account JSON file | `FIREBASE_CREDENTIALS_PATH` | Local dev (default: `backend/firebase-credentials.json`) |
+| Inline service-account JSON | `FIREBASE_CREDENTIALS` | Docker / CI / Cloud Run |
+| Application Default Credentials | `FIREBASE_PROJECT_ID` | Cloud Run / GCE / `gcloud auth` |
+
+Get a service-account key from **Firebase Console → Project Settings → Service Accounts → Generate new private key**. Authentication uses Firebase Authentication (Email/Password) alongside Firestore-stored user records — enable Email/Password sign-in under **Authentication → Sign-in method**.
 
 ---
 
@@ -131,14 +154,16 @@ cd filmiq
 cp .env.example .env
 # Edit .env with your credentials:
 #   ANTHROPIC_API_KEY=sk-ant-...
-#   DB_PASSWORD=your_secure_password
+#   FIREBASE_CREDENTIALS_PATH=./firebase-credentials.json   (or FIREBASE_CREDENTIALS / FIREBASE_PROJECT_ID)
 #   JWT_SECRET=your_jwt_secret
 ```
 
-### 2. Place Dataset
+### 2. Dataset
+
+`data/movie_dataset.csv` (4,803 TMDb films) already ships with the repo — no action needed unless you want to swap in your own dataset:
 
 ```bash
-cp path/to/dataset_1_collected_data.csv data/
+cp path/to/your_dataset.csv data/movie_dataset.csv
 ```
 
 ### 3. Start with Docker
@@ -150,13 +175,9 @@ docker compose up -d
 docker compose --profile training up ml_worker
 ```
 
-### 4. Seed the database
+A default admin account is bootstrapped automatically on first startup (see `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` in `.env.example`).
 
-```bash
-docker compose --profile seed up seeder
-```
-
-### 5. Access
+### 4. Access
 
 | Service | URL |
 |---------|-----|
@@ -164,16 +185,45 @@ docker compose --profile seed up seeder
 | Backend API | http://localhost:8000 |
 | API Docs | http://localhost:8000/docs |
 
-### Demo credentials
+### Default admin account
 
-> ⚠️ Change these immediately in any non-local environment.
+> ⚠️ Change this password immediately in any non-local environment.
 
-| Role | Email | Password |
-|------|-------|----------|
-| Admin | admin@filmiq.africa | filmiq_admin_2025 |
-| Analyst | analyst@filmiq.africa | demo1234 |
+| Email | Password |
+|-------|----------|
+| admin@filmiq.africa | Admin@123 |
 
-Self-registration is disabled. Only admins can create new accounts via **Admin Panel → Users → Add User**.
+The account is force-flagged `must_change_password` on first login. Override via `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` in `.env`.
+
+---
+
+## 🔁 Running It Again (after initial setup)
+
+Once `.env` is configured and the dataset is in place, you don't need to repeat the steps above. Just start the services:
+
+### Docker
+
+```bash
+docker compose up -d
+
+# Stop everything
+docker compose down
+```
+
+### Local Development (no Docker)
+
+```bash
+# Terminal 1 — Backend
+cd backend
+source venv/bin/activate    # Windows: venv\Scripts\activate
+uvicorn main:app --reload --port 8000
+
+# Terminal 2 — Frontend
+cd frontend
+npm run dev
+```
+
+Then open http://localhost:3000.
 
 ---
 
@@ -183,17 +233,10 @@ Self-registration is disabled. Only admins can create new accounts via **Admin P
 
 ```bash
 cd backend
-python -m venv venv && source venv/bin/activate
+python -m venv venv && source venv/bin/activate .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# Start PostgreSQL (Docker)
-docker compose up db redis -d
-
-# Run migrations
-alembic upgrade head
-
-# Seed data
-python scripts/seed_data.py
+# Configure Firebase credentials (see .env.example)
 
 # Start API
 uvicorn main:app --reload --port 8000
@@ -206,7 +249,7 @@ cd ml
 pip install scikit-learn xgboost pandas numpy textblob nltk
 
 # Train all models
-python predictor.py --train ../data/dataset_1_collected_data.csv
+python predictor.py --train ../data/movie_dataset.csv
 
 # Quick prediction test
 python predictor.py
@@ -225,15 +268,9 @@ npm run dev
 
 ## 🌍 African Market Focus
 
-The platform includes specialized analytics for:
+The Investor Intel module (`backend/routers/investors.py`) presents market-share and growth figures for Uganda, Nigeria, Kenya, Ghana, and South Africa.
 
-- **Uganda** — 3 major multiplex operators, growing middle-class audience
-- **Nigeria** — Nollywood, largest African film economy
-- **Kenya, Ghana, South Africa** — Regional distribution hubs
-- **Pan-African** — 54-nation content strategy
-- **African Diaspora** — Global streaming distribution
-
-Market projections show **18% CAGR** through 2030.
+> ⚠️ No real African box-office/market-size dataset exists in this repo — the TMDb CSV has no country-of-market or regional revenue data. The market-size, market-share, and growth figures in Investor Intel are **illustrative placeholders**, not measured data. Treat them as a UI demo, not a source of truth, until a real regional dataset is wired in.
 
 ---
 
@@ -261,21 +298,38 @@ Content-Type: application/json
 ### Response
 ```json
 {
+  "title": "The Uganda Chronicles",
   "predicted_revenue": 8200000,
   "predicted_opening_weekend": 2296000,
   "predicted_roi": 64.0,
   "confidence": 0.837,
   "model_used": "CNN-C",
   "genre_multiplier": 1.60,
+  "cast_multiplier": 1.12,
+  "seasonal_multiplier": 1.08,
+  "sentiment_boost": 0.05,
   "risk_level": "MODERATE",
   "ai_analysis": "...",
-  "recommendation": "Consider summer release window for +38% uplift"
+  "recommendation": "Consider summer release window for +38% uplift",
+  "breakdown": { "...": "per-factor contribution detail" },
+  "sentiment_analysis": null
 }
 ```
 
 ### Sentiment Analysis
+
+Single comment:
 ```http
 POST /api/sentiment/analyze
+{
+  "text": "Amazing film, best of the year!",
+  "days_before": 3
+}
+```
+
+Batch of comments:
+```http
+POST /api/sentiment/batch
 {
   "comments": [
     {"text": "Amazing film, best of the year!", "days_before": 3},
@@ -288,9 +342,11 @@ POST /api/sentiment/analyze
 
 ## 🗄 Database Schema
 
-Key tables: `users`, `movies`, `genres`, `movie_cast`, `movie_crew`, `persons`, `predictions`, `audience_sentiment`, `streaming_stats`, `investors`, `reports`
+Firestore collections: `users`, `predictions`, `reportTemplates`, `submissions`, `submissionVersions`, `validationResults`, `activityLogs`.
 
-See `backend/models.py` for full SQLAlchemy definitions with all column types and relationships.
+The movie catalog itself (browsed in Dashboard/Movies/Analytics) is read from `data/movie_dataset.csv` via `backend/movie_dataset.py`, not Firestore. The Data Portal (`/filmmaker`) stores user-submitted datasets in Firestore instead: `reportTemplates` holds user-defined schemas (field name/type/required/validation rules), `submissions` tracks each upload's lifecycle (`draft → submitted → under_review → approved/processed/rejected`), `submissionVersions` holds the parsed CSV rows + column mapping for each re-upload, `validationResults` holds the per-version error/warning/duplicate report, and `activityLogs` records who did what. AI chat (`/api/chat`) is stateless and does not persist history.
+
+See `backend/models.py` for Pydantic schemas and `backend/firebase_db.py` for the Firestore client. Full Data Portal architecture (schema, pipeline, wizard flow, migration notes) is documented in [`docs/DATA_PORTAL_ARCHITECTURE.md`](docs/DATA_PORTAL_ARCHITECTURE.md).
 
 ---
 
@@ -298,12 +354,12 @@ See `backend/models.py` for full SQLAlchemy definitions with all column types an
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Next.js 14, TypeScript, TailwindCSS, Framer Motion, ShadCN UI, Recharts |
-| Backend | FastAPI, Python 3.11, Async SQLAlchemy, Alembic |
-| Database | PostgreSQL 16, Redis 7 |
+| Frontend | Next.js 14, TypeScript, TailwindCSS, Framer Motion, Recharts |
+| Backend | FastAPI, Python 3.11 |
+| Database | Firebase Firestore, Firebase Authentication, Redis 7 |
 | ML | scikit-learn, XGBoost, pandas, NumPy, TextBlob, NLTK |
 | AI | Anthropic Claude (claude-sonnet-4-20250514) |
-| Auth | JWT (python-jose) |
+| Auth | Firebase Auth + JWT (python-jose) |
 | Infra | Docker, Nginx, GitHub Actions CI/CD |
 
 ---
@@ -326,4 +382,13 @@ This platform implements the methodology from:
 
 MIT License — FilmIQ Platform © 2025
 
-Built for the Ugandan and African film industry 🎬🌍
+Built for the Ugandan film industry 🎬🇺🇬
+
+---
+
+## 👤 Developer Information
+
+Makerere University
+College of Computing and Information Sciences
+Department of Information Systems
+BIST III Group 50

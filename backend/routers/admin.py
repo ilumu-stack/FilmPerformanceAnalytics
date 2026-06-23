@@ -1,21 +1,66 @@
 """
-FilmIQ — Admin Router
-Requires admin role. Manages users, ETL, cache, and system controls.
+FilmIQ — Admin Router (Firestore + Firebase Auth edition)
+Requires admin role. All user mutations are mirrored to Firebase Authentication.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Optional
+import asyncio
+import os
 from datetime import datetime, timezone
-import os, json
+from typing import Optional
 
-from database import get_db
-from models import User, Movie, Prediction, UserRole
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from firebase_db import db
+from firebase_admin import firestore, auth as firebase_auth
+from google.cloud.firestore_v1.base_query import FieldFilter
+from models import User, UserRole
 from auth_utils import get_current_admin, hash_password, validate_password_complexity
+import analytics_service
 
 router = APIRouter()
+
+
+# ─── Firebase Auth helpers ───────────────────────────────────────────────────
+
+async def _fb_get_uid(email: str) -> Optional[str]:
+    """Return Firebase Auth UID for an email, or None if not found."""
+    try:
+        record = await asyncio.to_thread(firebase_auth.get_user_by_email, email)
+        return record.uid
+    except firebase_auth.UserNotFoundError:
+        return None
+
+
+async def _fb_create(email: str, password: str, display_name: str, disabled: bool = False) -> None:
+    try:
+        await asyncio.to_thread(
+            firebase_auth.create_user,
+            email=email,
+            password=password,
+            display_name=display_name,
+            disabled=disabled,
+        )
+    except firebase_auth.EmailAlreadyExistsError:
+        pass
+
+
+async def _fb_update_password(email: str, new_password: str) -> None:
+    uid = await _fb_get_uid(email)
+    if uid:
+        await asyncio.to_thread(firebase_auth.update_user, uid, password=new_password)
+
+
+async def _fb_set_disabled(email: str, disabled: bool) -> None:
+    uid = await _fb_get_uid(email)
+    if uid:
+        await asyncio.to_thread(firebase_auth.update_user, uid, disabled=disabled)
+
+
+async def _fb_delete(email: str) -> None:
+    uid = await _fb_get_uid(email)
+    if uid:
+        await asyncio.to_thread(firebase_auth.delete_user, uid)
 
 
 # ─── Schemas ────────────────────────────────────────────────────────────────
@@ -39,6 +84,12 @@ class CreateUserRequest(BaseModel):
     def complexity(cls, v: str) -> str:
         return validate_password_complexity(v)
 
+class EditUserRequest(BaseModel):
+    full_name:    Optional[str] = Field(default=None, max_length=200)
+    username:     Optional[str] = Field(default=None, min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_-]+$")
+    organisation: Optional[str] = None
+    country:      Optional[str] = None
+
 class ResetPasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128)
 
@@ -51,185 +102,220 @@ class ResetPasswordRequest(BaseModel):
 # ─── User Management ────────────────────────────────────────────────────────
 @router.get("/users")
 async def list_users(
-    page:  int = 1,
-    limit: int = 50,
-    db:    AsyncSession = Depends(get_db),
+    page:   int = 1,
+    limit:  int = 50,
     _admin: User = Depends(get_current_admin),
 ):
-    offset = (page - 1) * limit
-    result = await db.execute(
-        select(User).order_by(User.created_at.desc()).offset(offset).limit(limit)
-    )
-    users = result.scalars().all()
-    total = await db.scalar(select(func.count(User.id)))
+    all_docs = await db.collection("users").order_by("created_at").get()
+    total    = len(all_docs)
+    offset   = (page - 1) * limit
+    page_docs = all_docs[offset : offset + limit]
+
+    users = []
+    for doc in page_docs:
+        u = User.from_firestore(doc)
+        users.append({
+            "id":                   u.id,
+            "email":                u.email,
+            "username":             u.username,
+            "full_name":            u.full_name,
+            "role":                 u.role,
+            "country":              u.country,
+            "organisation":         u.organisation,
+            "is_active":            u.is_active,
+            "must_change_password": bool(u.must_change_password),
+            "created_at":           str(u.created_at) if u.created_at else None,
+            "last_login":           str(u.last_login)  if u.last_login  else None,
+        })
+
     return {
-        "users": [
-            {
-                "id":           u.id,
-                "email":        u.email,
-                "username":     u.username,
-                "full_name":    u.full_name,
-                "role":         u.role,
-                "country":      u.country,
-                "organisation": u.organisation,
-                "is_active":    u.is_active,
-                "created_at":   str(u.created_at),
-                "last_login":   str(u.last_login) if u.last_login else None,
-            }
-            for u in users
-        ],
+        "users": users,
         "total": total,
         "page":  page,
         "pages": (total + limit - 1) // limit if total else 0,
     }
 
 
-@router.put("/users/{user_id}/role")
-async def change_user_role(
-    user_id: int,
-    body:    UserRoleUpdate,
-    db:      AsyncSession = Depends(get_db),
+@router.put("/users/{user_id}")
+async def edit_user(
+    user_id: str,
+    body:    EditUserRequest,
     _admin:  User = Depends(get_current_admin),
 ):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
         raise HTTPException(404, "User not found")
-    user.role = body.role.value  # String column requires .value not enum object
-    await db.commit()
+
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        return {"message": "No changes", "user_id": user_id}
+
+    if "username" in updates:
+        existing = await db.collection("users").where(
+            filter=FieldFilter("username", "==", updates["username"])
+        ).limit(1).get()
+        if existing and existing[0].id != user_id:
+            raise HTTPException(400, "Username already taken")
+
+    updates["updated_at"] = firestore.SERVER_TIMESTAMP
+    await db.collection("users").document(user_id).update(updates)
+    return {"message": "User updated", "user_id": user_id}
+
+
+@router.put("/users/{user_id}/role")
+async def change_user_role(
+    user_id: str,
+    body:    UserRoleUpdate,
+    _admin:  User = Depends(get_current_admin),
+):
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
+        raise HTTPException(404, "User not found")
+    await db.collection("users").document(user_id).update({"role": body.role.value})
     return {"message": f"Role updated to {body.role.value}", "user_id": user_id}
 
 
 @router.put("/users/{user_id}/status")
 async def toggle_user_status(
-    user_id: int,
+    user_id: str,
     body:    UserStatusUpdate,
-    db:      AsyncSession = Depends(get_db),
     _admin:  User = Depends(get_current_admin),
 ):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
         raise HTTPException(404, "User not found")
-    user.is_active = body.is_active
-    await db.commit()
+
+    email = (doc.to_dict() or {}).get("email", "")
+    # Mirror to Firebase Auth (disabled = not active)
+    await _fb_set_disabled(email, disabled=not body.is_active)
+    await db.collection("users").document(user_id).update({"is_active": body.is_active})
     return {"message": f"User {'activated' if body.is_active else 'deactivated'}", "user_id": user_id}
 
 
 @router.delete("/users/{user_id}")
 async def delete_user(
-    user_id: int,
-    db:      AsyncSession = Depends(get_db),
+    user_id: str,
     admin:   User = Depends(get_current_admin),
 ):
     if user_id == admin.id:
         raise HTTPException(400, "Cannot delete your own account")
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
         raise HTTPException(404, "User not found")
-    await db.delete(user)
-    await db.commit()
+
+    email = (doc.to_dict() or {}).get("email", "")
+    await _fb_delete(email)
+    await db.collection("users").document(user_id).delete()
     return {"message": "User deleted"}
 
 
 @router.post("/users", status_code=201)
 async def create_user(
     body:   CreateUserRequest,
-    db:     AsyncSession = Depends(get_db),
     _admin: User = Depends(get_current_admin),
 ):
-    if await db.scalar(select(User).where(User.email == body.email)):
+    email_str = str(body.email)
+
+    # Uniqueness checks
+    email_docs    = await db.collection("users").where(filter=FieldFilter("email",    "==", email_str)).limit(1).get()
+    username_docs = await db.collection("users").where(filter=FieldFilter("username", "==", body.username)).limit(1).get()
+    if email_docs:
         raise HTTPException(400, "Email already in use")
-    if await db.scalar(select(User).where(User.username == body.username)):
+    if username_docs:
         raise HTTPException(400, "Username already taken")
 
-    user = User(
-        email=body.email,
-        username=body.username,
-        hashed_password=hash_password(body.password),
-        full_name=body.full_name,
-        role=body.role.value,
-        organisation=body.organisation,
-        country=body.country,
-        is_active=True,
+    # Create in Firebase Authentication first
+    await _fb_create(
+        email=email_str,
+        password=body.password,
+        display_name=body.full_name or body.username,
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
+
+    # Create in Firestore
+    doc_ref = db.collection("users").document()
+    await doc_ref.set({
+        "email":                email_str,
+        "username":             body.username,
+        "hashed_password":      hash_password(body.password),
+        "full_name":            body.full_name,
+        "role":                 body.role.value,
+        "organisation":         body.organisation,
+        "country":              body.country,
+        "is_active":            True,
+        "must_change_password": True,
+        "created_at":           firestore.SERVER_TIMESTAMP,
+        "updated_at":           None,
+        "last_login":           None,
+    })
+
     return {
-        "id":        user.id,
-        "email":     user.email,
-        "username":  user.username,
-        "role":      user.role,
-        "is_active": user.is_active,
+        "id":        doc_ref.id,
+        "email":     email_str,
+        "username":  body.username,
+        "role":      body.role.value,
+        "is_active": True,
         "message":   "User created successfully",
     }
 
 
 @router.post("/users/{user_id}/reset-password")
 async def reset_user_password(
-    user_id: int,
+    user_id: str,
     body:    ResetPasswordRequest,
-    db:      AsyncSession = Depends(get_db),
     _admin:  User = Depends(get_current_admin),
 ):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
         raise HTTPException(404, "User not found")
-    user.hashed_password = hash_password(body.new_password)
-    user.updated_at      = datetime.now(timezone.utc)
-    await db.commit()
-    return {"message": f"Password reset for {user.email}"}
+
+    data  = doc.to_dict() or {}
+    email = data.get("email", "")
+
+    # Update Firebase Auth password
+    await _fb_update_password(email, body.new_password)
+
+    # Update Firestore
+    await db.collection("users").document(user_id).update({
+        "hashed_password":      hash_password(body.new_password),
+        "must_change_password": True,
+        "updated_at":           firestore.SERVER_TIMESTAMP,
+    })
+    return {"message": f"Password reset for {email}"}
 
 
 # ─── System Stats ────────────────────────────────────────────────────────────
 @router.get("/stats")
-async def system_stats(
-    db:     AsyncSession = Depends(get_db),
-    _admin: User = Depends(get_current_admin),
-):
-    users_count  = await db.scalar(select(func.count(User.id)))
-    movies_count = await db.scalar(select(func.count(Movie.id)))
-    preds_count  = await db.scalar(select(func.count(Prediction.id)))
+async def system_stats(_admin: User = Depends(get_current_admin)):
+    user_docs  = await db.collection("users").get()
+    pred_docs  = await db.collection("predictions").get()
 
-    # ML models status
     ml_path = os.environ.get("ML_MODEL_PATH", "ml/saved_models")
     models_loaded = []
     for name in ["random_forest", "xgboost", "neural_net", "scaler"]:
         path = os.path.join(ml_path, f"{name}.pkl")
         models_loaded.append({"name": name, "loaded": os.path.exists(path)})
 
-    # Training results if available
-    training_results = None
-    results_path = os.path.join(os.path.dirname(__file__), "../../ml/training_results.json")
-    try:
-        with open(results_path) as f:
-            training_results = json.load(f)
-    except Exception:
-        pass
+    training_results = analytics_service.model_accuracy()
 
     return {
         "database": {
-            "users":       users_count or 0,
-            "movies":      movies_count or 0,
-            "predictions": preds_count or 0,
+            "type":        "firestore",
+            "users":       len(user_docs),
+            "predictions": len(pred_docs),
         },
-        "ml_models":       models_loaded,
+        "ml_models":        models_loaded,
         "training_results": training_results,
-        "environment":     os.environ.get("ENVIRONMENT", "development"),
+        "environment":      os.environ.get("ENVIRONMENT", "development"),
     }
 
 
 # ─── ETL Controls ────────────────────────────────────────────────────────────
 @router.get("/etl/status")
 async def etl_status(_admin: User = Depends(get_current_admin)):
-    """Report on data pipeline state."""
     return {
-        "status":       "idle",
-        "last_run":     None,
-        "next_run":     None,
+        "status":            "idle",
+        "last_run":          None,
+        "next_run":          None,
         "records_processed": 0,
         "available_sources": ["tmdb_csv", "manual_upload"],
     }
@@ -241,14 +327,11 @@ async def trigger_etl(
     source: str = "tmdb_csv",
     _admin: User = Depends(get_current_admin),
 ):
-    """Trigger a background ETL job."""
     background_tasks.add_task(_run_etl, source)
     return {"message": f"ETL job '{source}' started", "status": "running"}
 
 
 async def _run_etl(source: str):
-    """Placeholder ETL runner — extend with real pipeline logic."""
-    import asyncio
     await asyncio.sleep(1)
     print(f"ETL '{source}' completed (placeholder)")
 
@@ -256,7 +339,6 @@ async def _run_etl(source: str):
 # ─── Cache ───────────────────────────────────────────────────────────────────
 @router.delete("/cache")
 async def flush_cache(_admin: User = Depends(get_current_admin)):
-    """Flush Redis analytics cache."""
     try:
         import redis.asyncio as aioredis
         from config import settings
@@ -270,22 +352,15 @@ async def flush_cache(_admin: User = Depends(get_current_admin)):
 
 # ─── Reports ─────────────────────────────────────────────────────────────────
 @router.get("/reports")
-async def list_reports(
-    db:     AsyncSession = Depends(get_db),
-    _admin: User = Depends(get_current_admin),
-):
-    from models import Report
-    result = await db.execute(
-        select(Report).order_by(Report.created_at.desc()).limit(50)
-    )
-    reports = result.scalars().all()
+async def list_reports(_admin: User = Depends(get_current_admin)):
+    docs = await db.collection("reports").order_by("created_at").limit(50).get()
     return [
         {
-            "id":          r.id,
-            "title":       r.title,
-            "report_type": r.report_type,
-            "user_id":     r.user_id,
-            "created_at":  str(r.created_at),
+            "id":          doc.id,
+            "title":       doc.to_dict().get("title"),
+            "report_type": doc.to_dict().get("report_type"),
+            "user_id":     doc.to_dict().get("user_id"),
+            "created_at":  str(doc.to_dict().get("created_at")),
         }
-        for r in reports
+        for doc in docs
     ]

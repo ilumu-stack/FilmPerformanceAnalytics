@@ -71,7 +71,7 @@ seed:
 
 # ── ML ────────────────────────────────────────────────────────────────────────
 train:
-	$(PYTHON) ml/predictor.py --train data/dataset_1_collected_data.csv
+	$(PYTHON) ml/predictor.py --train data/movie_dataset.csv
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 test:

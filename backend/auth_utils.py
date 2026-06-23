@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 """
-FilmIQ — Auth Utilities
+FilmIQ — Auth Utilities (Firestore edition)
 Provides get_current_user() FastAPI dependency and shared password helpers.
-Extracted here to avoid circular imports between routers/auth.py and other routers.
 """
 
 import bcrypt
 import re
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from jose import JWTError, jwt
 
-from database import get_db
+from firebase_db import db
 from models import User
 from config import settings
 
@@ -23,10 +20,9 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
 ) -> User:
     """
-    FastAPI dependency: decode Bearer JWT → return authenticated User.
+    FastAPI dependency: decode Bearer JWT → return authenticated User from Firestore.
     Raises 401 if token is missing, expired, or invalid.
     """
     if credentials is None:
@@ -36,7 +32,6 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
     credentials_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or expired token",
@@ -45,7 +40,7 @@ async def get_current_user(
 
     try:
         payload = jwt.decode(
-            token,
+            credentials.credentials,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
         )
@@ -58,11 +53,12 @@ async def get_current_user(
     except JWTError:
         raise credentials_exc
 
-    result = await db.execute(select(User).where(User.id == int(user_id)))
-    user = result.scalar_one_or_none()
-
-    if user is None:
+    doc = await db.collection("users").document(user_id).get()
+    if not doc.exists:
         raise credentials_exc
+
+    user = User.from_firestore(doc)
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -84,7 +80,31 @@ async def get_current_admin(
     return current_user
 
 
-# ── Password helpers (used by auth router + admin router) ─────────────────────
+async def get_current_filmmaker(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Dependency: require filmmaker or admin role."""
+    if current_user.role not in ("filmmaker", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Filmmaker access required",
+        )
+    return current_user
+
+
+async def get_current_investor(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Dependency: require investor or admin role."""
+    if current_user.role not in ("investor", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Investor access required",
+        )
+    return current_user
+
+
+# ── Password helpers ──────────────────────────────────────────────────────────
 
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()

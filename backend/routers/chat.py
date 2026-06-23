@@ -17,6 +17,7 @@ import httpx
 import asyncio
 
 from config import settings
+import analytics_service
 
 router = APIRouter()
 
@@ -66,17 +67,17 @@ class ChatResponse(BaseModel):
     reply: str
 
 
-SYSTEM_PROMPT = (
-    "You are FilmIQ Analyst, an expert in African cinema analytics, box office prediction, "
-    "and film investment intelligence. Key dataset facts:\n"
-    "- 9,999 TMDB films analyzed\n"
-    "- Top revenue: Avatar $2.92B, Avengers: Endgame $2.80B, Titanic $2.26B\n"
-    "- Best ROI genres: Adventure (avg $226M), Animation ($171M), Action ($160M)\n"
-    "- Ugandan/African market growing at 18% CAGR, projected $2.1B by 2030\n"
-    "- CNN-C model: 83.7% prediction accuracy\n"
-    "- Sentiment coefficients: positive +1.862, negative −2.369 (Zhang et al. 2024)\n"
-    "Be concise, data-driven, and Africa-focused. Max 150 words per response."
-)
+def _system_prompt() -> str:
+    """Built fresh from analytics_service so the model is grounded in real,
+    currently-computed numbers — never a hardcoded snapshot."""
+    return (
+        "You are FilmIQ Analyst, an expert in film analytics, box office prediction, "
+        "and film investment intelligence. Use ONLY the following real, computed dataset "
+        "facts — never invent figures, and explicitly say so if asked about something "
+        "this dataset doesn't cover (e.g. Ugandan market size/CAGR):\n"
+        f"{analytics_service.chat_context_facts()}\n"
+        "Be concise and data-driven. Max 150 words per response."
+    )
 
 
 # ── Endpoint ─────────────────────────────────────────────────────────────────
@@ -104,7 +105,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
                 json={
                     "model":      settings.anthropic_model,
                     "max_tokens": 400,
-                    "system":     SYSTEM_PROMPT,
+                    "system":     _system_prompt(),
                     "messages":   messages,
                 },
             )
@@ -117,30 +118,38 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     return ChatResponse(reply=_fallback(req.message))
 
 
+def _genre_summary() -> str:
+    parts = ", ".join(
+        f"{g['genre']} (${g['avg_revenue'] / 1e6:.0f}M avg revenue)"
+        for g in analytics_service.top_genres_by_revenue(3)
+    )
+    return f"Highest-revenue genres in the dataset: {parts}."
+
+
+def _roi_summary() -> str:
+    parts = ", ".join(
+        f"{f['title']} ({f['roi']:+.0f}% ROI)"
+        for f in analytics_service.top_roi_films(3)
+    )
+    return f"Highest-ROI films in the dataset: {parts}."
+
+
 def _fallback(q: str) -> str:
+    """Offline fallback when the Claude API is unavailable — every figure here
+    is computed live from the dataset, never a fixed claim."""
     lower = q.lower()
     if "africa" in lower or "uganda" in lower:
         return (
-            "The African film market grows at 18% CAGR, projected to reach $2.1B by 2030. "
-            "Uganda leads East Africa. Pan-African distribution targeting 54 nations maximizes scale."
+            "This dataset has no Ugandan-market-specific data (size, CAGR, country "
+            "breakdown), so I can't give a real figure for that. " + _genre_summary()
         )
     if "genre" in lower:
-        return (
-            "From 9,999 films: Adventure leads at $226M avg, Family $195M, Sci-Fi $183M. "
-            "Thriller underperforms (coeff −1.12)."
-        )
+        return _genre_summary()
     if "roi" in lower or "invest" in lower:
-        return (
-            "Highest ROI: Ne Zha 2 (+2,554%), Avatar (+1,134%), Titanic (+1,032%). "
-            "Pattern: family/animation + summer release + pan-African distribution."
-        )
+        return _roi_summary()
     if "predict" in lower or "model" in lower:
-        return (
-            "CNN-C achieves 83.7% accuracy on 9,999 films. "
-            "Sentiment data improves accuracy by 11.8–16.1%."
-        )
-    return (
-        "FilmIQ analyzed 9,999 TMDB films. "
-        "Sentiment integration boosts box office prediction accuracy by up to 16.1%. "
-        "African market is the fastest-growing film economy at 18% CAGR."
-    )
+        acc = analytics_service.model_accuracy()
+        if acc["best_model"]:
+            return f"The {acc['best_model']} model achieves R²={acc['best_r2']}% on this dataset's box-office regression task."
+        return "No trained model results are available yet."
+    return _genre_summary() + " " + _roi_summary()

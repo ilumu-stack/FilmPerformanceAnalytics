@@ -1,34 +1,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# FilmIQ — Docker Compose
+# FilmIQ — Docker Compose  (Firestore edition)
 # Run from the PROJECT ROOT: filmiq/
 #   docker compose up -d
 #
+# Data is stored in Firebase Firestore — no db container needed.
 # Required env vars (copy .env.example to .env and fill in):
 #   ANTHROPIC_API_KEY   your Anthropic API key
-#   DB_PASSWORD         postgres password (default: filmiq_secret)
-#   JWT_SECRET          random secret (default: dev value — CHANGE IN PRODUCTION)
+#   JWT_SECRET          random secret (CHANGE IN PRODUCTION)
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
-
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB:       filmiq
-      POSTGRES_USER:     filmiq_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-filmiq_secret}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U filmiq_user -d filmiq"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ── Redis ────────────────────────────────────────────────────────────────────
   redis:
@@ -50,25 +31,38 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # host.docker.internal resolves to the Windows host (XAMPP).
+    # On Linux Docker Engine (non-Desktop) it requires the extra_hosts entry below.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      DATABASE_URL:      postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
-      REDIS_URL:         redis://redis:6379/0
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      JWT_SECRET:        ${JWT_SECRET:-filmiq_jwt_dev_secret_change_in_production}
-      ENVIRONMENT:       ${ENVIRONMENT:-production}
-      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
-      ML_MODEL_PATH:     /app/ml/saved_models
+      REDIS_URL:                redis://redis:6379/0
+      ANTHROPIC_API_KEY:        ${ANTHROPIC_API_KEY:-}
+      JWT_SECRET:               ${JWT_SECRET:-filmiq_jwt_dev_secret_change_in_production}
+      ENVIRONMENT:               ${ENVIRONMENT:-production}
+      LOG_LEVEL:                ${LOG_LEVEL:-INFO}
+      ML_MODEL_PATH:            /app/ml/saved_models
+      TMDB_API_KEY:             ${TMDB_API_KEY:-}
+      FIREBASE_PROJECT_ID:      ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CREDENTIALS:     ${FIREBASE_CREDENTIALS:-}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-}
+      # DEFAULT_ADMIN_EMAIL/PASSWORD intentionally NOT passed through with a
+      # ${VAR:-} fallback: an empty-string env var still overrides pydantic-
+      # settings' class default ("admin@filmiq.africa"), breaking the bootstrap
+      # admin creation when the var isn't set in .env. Only forward them if
+      # the caller actually sets DEFAULT_ADMIN_EMAIL/PASSWORD in the shell/.env.
+      DEFAULT_ADMIN_EMAIL:      ${DEFAULT_ADMIN_EMAIL:-admin@filmiq.africa}
+      DEFAULT_ADMIN_PASSWORD:   ${DEFAULT_ADMIN_PASSWORD:-Admin@123}
     volumes:
       - ./ml/predictor.py:/app/ml/predictor.py:ro
       - ./ml/sentiment.py:/app/ml/sentiment.py:ro
       - ./ml/__init__.py:/app/ml/__init__.py:ro
+      - ./ml/training_results.json:/app/ml/training_results.json:ro
       - model_cache:/app/ml/saved_models
       - ./data:/app/data:ro
     ports:
       - "8000:8000"
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
@@ -79,36 +73,15 @@ services:
       context: ./backend
       dockerfile: Dockerfile.ml
     restart: "no"
-    environment:
-      DATABASE_URL: postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./ml:/app/ml
       - model_cache:/app/ml/saved_models
       - ./data:/app/data:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    command: python ml/predictor.py --train data/dataset_1_collected_data.csv
+    command: python ml/predictor.py --train data/movie_dataset.csv
     profiles:
       - training
-
-  # ── DB Seeder (run once) ─────────────────────────────────────────────────────
-  seeder:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: "no"
-    environment:
-      DATABASE_URL: postgresql+asyncpg://filmiq_user:${DB_PASSWORD:-filmiq_secret}@db:5432/filmiq
-    volumes:
-      - ./data:/app/data:ro
-      - ./ml:/app/ml:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    command: python scripts/seed_data.py
-    profiles:
-      - seed
 
   # ── Next.js Frontend ─────────────────────────────────────────────────────────
   frontend:
@@ -117,6 +90,13 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+        NEXT_PUBLIC_FIREBASE_API_KEY: ${NEXT_PUBLIC_FIREBASE_API_KEY:-}
+        NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:-}
+        NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${NEXT_PUBLIC_FIREBASE_PROJECT_ID:-}
+        NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET:-}
+        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:-}
+        NEXT_PUBLIC_FIREBASE_APP_ID: ${NEXT_PUBLIC_FIREBASE_APP_ID:-}
+        NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID: ${NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID:-}
     restart: unless-stopped
     environment:
       BACKEND_URL: http://backend:8000
@@ -140,6 +120,5 @@ services:
 
 
 volumes:
-  postgres_data:
   redis_data:
   model_cache:

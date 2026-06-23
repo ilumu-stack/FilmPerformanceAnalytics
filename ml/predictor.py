@@ -8,7 +8,7 @@ Models: Linear Regression → Random Forest → XGBoost → Neural Network (CNN-
 
 import numpy as np
 import pandas as pd
-import pickle, os, logging
+import pickle, os, logging, json
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -16,26 +16,26 @@ from typing import Optional
 logger = logging.getLogger("filmiq.predictor")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Genre multipliers derived from 9,999-film TMDB dataset analysis
-# Weighted by avg_revenue / global_avg_revenue
+# Genre multipliers derived from the 4,803-film TMDB dataset (data/movie_dataset.csv)
+# Weighted by avg_revenue / global_avg_revenue, films with budget & revenue data only
 # ──────────────────────────────────────────────────────────────────────────────
 GENRE_MULTIPLIERS = {
-    "Adventure":        2.26,
-    "Family":           1.95,
-    "Science Fiction":  1.83,
-    "Animation":        1.71,
-    "Fantasy":          1.68,
-    "Action":           1.60,
-    "Music":            1.09,
-    "War":              1.02,
-    "Comedy":           1.21,
-    "Romance":          0.92,
-    "Drama":            0.78,
-    "Crime":            0.55,
-    "Thriller":         0.61,
-    "Horror":           0.48,
-    "Mystery":          0.52,
-    "Documentary":      0.31,
+    "Adventure":        2.04,
+    "Family":           1.85,
+    "Science Fiction":  1.57,
+    "Animation":        2.32,
+    "Fantasy":          1.97,
+    "Action":           1.46,
+    "Music":            0.65,
+    "War":              0.84,
+    "Comedy":           0.90,
+    "Romance":          0.76,
+    "Drama":            0.68,
+    "Crime":            0.72,
+    "Thriller":         0.91,
+    "Horror":           0.56,
+    "Mystery":          0.84,
+    "Documentary":      0.22,
 }
 
 # MLR regression coefficients from the paper (Table 6, with comments model)
@@ -482,18 +482,44 @@ def train_models(csv_path: str):
 
     print("\n📈 Training Summary:")
     for model_name, metrics in results.items():
-        print(f"   {model_name:<25} R²={metrics['r2']:.3f}  MAE=${np.expm1(metrics['mae']):,.0f}  RMSE=${np.expm1(metrics['rmse']):,.0f}")
+        print(f"   {model_name:<25} R²={metrics['r2']:.3f}  MAE=${metrics['mae_dollars']:,.0f}")
+
+    # Persist real metrics so analytics_service.model_accuracy() (served on
+    # /api/analytics/model-accuracy and in the chat grounding facts) reflects
+    # this actual training run instead of a stale/disconnected file.
+    display_names = {
+        "linear_regression": "Linear Regression",
+        "random_forest":     "Random Forest",
+        "xgboost":            "XGBoost",
+        "neural_net":         "Neural Network",
+    }
+    results_path = Path(__file__).parent / "training_results.json"
+    payload = {
+        display_names.get(name, name): {
+            "r2":          metrics["r2"],
+            "mae":         metrics["mae"],
+            "rmse":        metrics["rmse"],
+            "mae_dollars": metrics["mae_dollars"],
+        }
+        for name, metrics in results.items()
+    }
+    results_path.write_text(json.dumps(payload, indent=2))
+    print(f"   ✅ Saved training_results.json → {results_path}")
 
     return results
 
 
 def _eval(y_true, y_pred, label):
+    """y_true/y_pred are log1p(revenue) — mae/rmse are reported in that log space;
+    mae_dollars is computed in actual dollar space (expm1 applied per-prediction,
+    not to the averaged log error, which would be mathematically wrong)."""
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     mae  = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     r2   = r2_score(y_true, y_pred)
+    mae_dollars = mean_absolute_error(np.expm1(y_true), np.expm1(y_pred))
     print(f"   ✓ {label}: R²={r2:.3f}, MAE={mae:.3f}, RMSE={rmse:.3f}")
-    return {"mae": mae, "rmse": rmse, "r2": r2}
+    return {"mae": mae, "rmse": rmse, "r2": r2, "mae_dollars": mae_dollars}
 
 
 if __name__ == "__main__":

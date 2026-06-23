@@ -176,10 +176,80 @@ class TestConfig:
         assert settings.jwt_algorithm == "HS256"
         assert settings.anthropic_model.startswith("claude")
 
-    def test_sqlalchemy_url_uses_asyncpg(self):
+    def test_default_admin_bootstrap_settings_exist(self):
         from config import settings
-        assert "asyncpg" in settings.sqlalchemy_url
+        assert settings.default_admin_email
+        assert settings.default_admin_password
 
     def test_environment_default_is_development(self):
         from config import settings
         assert settings.environment in ("development", "test", "production")
+
+
+# ── Sentiment → prediction wiring tests ─────────────────────────────────────
+class TestSentimentPredictionWiring:
+    """Validate that review_comments are scored and fed into the predictor
+    automatically — this is the actual connection between ml/sentiment.py and
+    ml/predictor.py, not just two independently-working pipelines."""
+
+    def setup_method(self):
+        from routers.predictions import _resolve_sentiment, PredictRequest
+        self._resolve_sentiment = _resolve_sentiment
+        self.PredictRequest = PredictRequest
+
+    def _req(self, **kwargs):
+        defaults = {"title": "Test Film", "budget": 5_000_000, "genre": "Action"}
+        defaults.update(kwargs)
+        return self.PredictRequest(**defaults)
+
+    def test_no_comments_falls_back_to_manual_score(self):
+        req = self._req(sentiment_score=0.3)
+        score, analysis = self._resolve_sentiment(req)
+        assert score == 0.3
+        assert analysis is None
+
+    def test_no_comments_and_no_manual_score_uses_neutral_default(self):
+        req = self._req()
+        score, analysis = self._resolve_sentiment(req)
+        assert score == 0.1
+        assert analysis is None
+
+    def test_comments_override_manual_score(self):
+        req = self._req(
+            sentiment_score=0.3,
+            review_comments=[{"text": "Amazing breathtaking masterpiece, loved it!"}],
+        )
+        score, analysis = self._resolve_sentiment(req)
+        assert analysis is not None
+        assert analysis["total_comments"] == 1
+        # The comment-derived score, not the manual one, must be used
+        assert score == analysis["aggregate_score"]
+
+    def test_negative_comments_yield_negative_or_low_score(self):
+        req = self._req(review_comments=[
+            {"text": "Terrible boring waste of time, awful film"},
+            {"text": "Horrible, dreadful, regret watching this"},
+        ])
+        score, analysis = self._resolve_sentiment(req)
+        assert analysis["negative_count"] >= 1
+        assert score <= 0.1
+
+    def test_effective_sentiment_flows_into_predictor(self, predictor):
+        """End-to-end: comments → sentiment score → predictor output changes."""
+        positive_req = self._req(
+            budget=5_000_000, genre="Action",
+            review_comments=[{"text": "Amazing incredible masterpiece, loved every moment!"}],
+        )
+        negative_req = self._req(
+            budget=5_000_000, genre="Action",
+            review_comments=[{"text": "Terrible awful boring waste of time"}],
+        )
+        pos_score, _ = self._resolve_sentiment(positive_req)
+        neg_score, _ = self._resolve_sentiment(negative_req)
+
+        pos_input = positive_req.model_dump(); pos_input["sentiment_score"] = pos_score
+        neg_input = negative_req.model_dump(); neg_input["sentiment_score"] = neg_score
+
+        pos_result = predictor.predict(pos_input)
+        neg_result = predictor.predict(neg_input)
+        assert pos_result["sentiment_boost"] > neg_result["sentiment_boost"]

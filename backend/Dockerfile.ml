@@ -14,4 +14,4 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY . .
 
 # Default: run training pipeline
-CMD ["python", "ml/predictor.py", "--train", "data/dataset_1_collected_data.csv"]
+CMD ["python", "ml/predictor.py", "--train", "data/movie_dataset.csv"]
