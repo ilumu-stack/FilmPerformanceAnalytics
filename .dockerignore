@@ -1,0 +1,37 @@
+# Root .dockerignore — applies to backend/Dockerfile and backend/Dockerfile.ml,
+# which now build with the repo root as context (needed to COPY the sibling ml/
+# package). Keeps the build context small/fast; none of this is needed in the
+# backend image.
+
+.git
+.gitignore
+
+frontend/
+frontend-guide/
+
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+
+ml/saved_models/*.pkl
+
+data/*.csv
+
+docs/
+tests/
+.agents/
+.claude/
+skills-lock.json
+
+node_modules/
+.next/
+*.tsbuildinfo
+
+.env
+.env.local
+*firebase-credentials*.json
+*service-account*.json

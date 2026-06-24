@@ -28,8 +28,8 @@ services:
   # ── FastAPI Backend ──────────────────────────────────────────────────────────
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     # host.docker.internal resolves to the Windows host (XAMPP).
     # On Linux Docker Engine (non-Desktop) it requires the extra_hosts entry below.
