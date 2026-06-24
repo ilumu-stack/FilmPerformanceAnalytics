@@ -68,6 +68,18 @@ class Settings(BaseSettings):
         "https://www.filmiq.africa",
     ]
 
+    # ── Trusted hosts (production only — see main.py TrustedHostMiddleware) ───
+    # Includes wildcards for common free-hosting domains (Render, Cloud Run) so
+    # the health check and API don't 400 on every request once deployed there.
+    # Override via ALLOWED_HOSTS env var (JSON array) for a custom domain.
+    allowed_hosts: list[str] = [
+        "filmiq.africa",
+        "*.filmiq.africa",
+        "localhost",
+        "*.onrender.com",
+        "*.run.app",
+    ]
+
     # ── ML ───────────────────────────────────────────────────────────────────
     ml_model_path:      str  = "ml/saved_models"
     retrain_on_startup: bool = False
